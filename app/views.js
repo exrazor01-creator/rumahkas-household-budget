@@ -1,80 +1,107 @@
-// Page renderers for RumahKas. Each returns HTML for <main>; main.js wires
-// the controls after insertion. Amounts are in rupiah; state (the visitor's
-// edits) lives in store.js and seeds from data.js.
+// Page renderers for RumahKas. Each function returns the HTML for <main>;
+// main.js wires the controls up after inserting it. Amounts are in rupiah.
+// The visitor's edits live in store.js and seed from data.js.
 
-import { META, CATEGORIES, PLAN, HISTORY, NAV, rp, rpShort, catById, totalIncome, groupTotals } from './data.js';
+import { META, CATEGORIES, BUDGET, INCOME, HISTORY, NAV, idr, idrShort, findCategory, incomeTotal, spentByCat, splitByKind, amountsByCat } from './data.js';
 import { loadState, saveState, resetState } from './store.js';
 import { donut, hbars, groupedBars } from './charts.js';
 
 let state = loadState();
 export function getState() { return state; }
 
+// INCOME is the live source the pages read; keep it in step with the
+// persisted state so an edited salary survives a reload, like the plan.
+function applyIncome() {
+  INCOME.salary = state.income?.salary ?? INCOME.salary;
+  INCOME.side = state.income?.side ?? INCOME.side;
+}
+applyIncome();
+
 function card(title, body, note) {
-  return `<section class="card"><h2>${title}</h2>${body}${note ? `<p class="note">${note}</p>` : ''}</section>`;
+  const foot = note ? `<p class="note">${note}</p>` : '';
+  return `<section class="card"><h2>${title}</h2>${body}${foot}</section>`;
 }
 
-function actualTotals() { return PLAN.actual; }
+function spentExcludingSavings() {
+  return BUDGET.filter((row) => row.cat !== 'savings').reduce((sum, row) => sum + row.spent, 0);
+}
 
 function healthScore() {
-  const income = totalIncome();
-  const actual = actualTotals();
-  const spent = Object.entries(actual).filter(([k]) => k !== 'savings').reduce((a, [, v]) => a + v, 0);
-  const saved = actual.savings || 0;
+  const income = incomeTotal();
+  const spent = spentExcludingSavings();
+  const saved = spentByCat('savings');
   const saveRate = saved / income;
-  const savePts = Math.round(Math.min(saveRate / 0.20, 1) * 40);
+  const savePts = Math.round(Math.min(saveRate / 0.2, 1) * 40);
   const over = spent / income;
   const budgetPts = over <= 1 ? 30 : Math.max(0, Math.round(30 - (over - 1) * 300));
-  const needs = groupTotals(actual).needs / income;
-  const needsPts = needs <= 0.5 ? 30 : needs >= 0.8 ? 10 : Math.round(30 - (needs - 0.5) / 0.3 * 20);
+  const needsShare = splitByKind(amountsByCat('spent')).needs / income;
+  const needsPts = needsShare <= 0.5 ? 30 : needsShare >= 0.8 ? 10 : Math.round(30 - ((needsShare - 0.5) / 0.3) * 20);
   const total = savePts + budgetPts + needsPts;
   const verdict = total >= 80 ? 'Healthy — keep it up' : total >= 60 ? 'Fair — a little tightening helps' : 'Stretched — needs attention';
-  return { total, savePts, budgetPts, needsPts, saveRate, over, needs, verdict };
+  return { total, savePts, budgetPts, needsPts, saveRate, over, needsShare, verdict };
+}
+
+function spendRows() {
+  return BUDGET.filter((row) => row.cat !== 'savings')
+    .map((row) => {
+      const cat = findCategory(row.cat);
+      return { label: cat.label, value: row.spent, color: cat.colour, display: idrShort(row.spent) };
+    })
+    .sort((a, b) => b.value - a.value);
+}
+
+function overPlanList() {
+  return BUDGET.filter((row) => row.cat !== 'savings' && row.spent > row.planned)
+    .map((row) => {
+      const cat = findCategory(row.cat);
+      const gap = row.spent - row.planned;
+      return `<li><b>${cat.label}</b> ran ${idr(gap)} over plan — ${idr(row.spent)} spent against ${idr(row.planned)} planned.</li>`;
+    })
+    .join('');
 }
 
 export function viewDashboard() {
-  const income = totalIncome();
-  const actual = actualTotals();
-  const spent = Object.entries(actual).filter(([k]) => k !== 'savings').reduce((a, [, v]) => a + v, 0);
+  const income = incomeTotal();
+  const spent = spentExcludingSavings();
+  const saved = spentByCat('savings');
   const h = healthScore();
-  const groups = groupTotals(actual);
-  const spendRows = CATEGORIES.filter(c => c.id !== 'savings').map(c => ({
-    label: c.name, value: actual[c.id] || 0, color: c.color, display: rpShort(actual[c.id] || 0),
-  })).sort((a, b) => b.value - a.value);
-  const alerts = CATEGORIES.filter(c => c.id !== 'savings' && (actual[c.id] || 0) > (PLAN.planned[c.id] || 0))
-    .map(c => `<li><b>${c.name}</b> is ${rp((actual[c.id] || 0) - (PLAN.planned[c.id] || 0))} over plan (${rp(actual[c.id])} spent vs ${rp(PLAN.planned[c.id])} planned).</li>`).join('');
+  const groups = splitByKind(amountsByCat('spent'));
+  const rows = spendRows();
+  const alerts = overPlanList();
+  const pct = (part) => Math.round((part / income) * 100);
   return `
-  <p class="lede">${META.household} · ${META.month}. Income ${rp(income)} a month —
-  this month the family spent ${rp(spent)} and saved ${rp(actual.savings)}.</p>
+  <p class="lede">${META.household} · ${META.month}. Take-home pay is ${idr(income)} a month —
+  in November the family spent ${idr(spent)} and put ${idr(saved)} aside.</p>
   <section class="kpis" aria-label="Month at a glance">
-    <article class="kpi"><div class="kpi-label">Income · ${META.month}</div><div class="kpi-value">${rp(income)}</div><p>Salary ${rp(PLAN.income.salary)} + side income ${rp(PLAN.income.side)}.</p></article>
-    <article class="kpi"><div class="kpi-label">Spent (excl. savings)</div><div class="kpi-value">${rp(spent)}</div><p>${(h.over * 100).toFixed(0)}% of income — ${h.over > 1 ? 'over income' : 'within income'}.</p></article>
-    <article class="kpi"><div class="kpi-label">Saved</div><div class="kpi-value">${rp(actual.savings)}</div><p>${(h.saveRate * 100).toFixed(0)}% savings rate · target 20%.</p></article>
+    <article class="kpi"><div class="kpi-label">Income · ${META.month}</div><div class="kpi-value">${idr(income)}</div><p>Salary ${idr(INCOME.salary)} plus side income ${idr(INCOME.side)}.</p></article>
+    <article class="kpi"><div class="kpi-label">Spent (excl. savings)</div><div class="kpi-value">${idr(spent)}</div><p>${Math.round(h.over * 100)}% of income — ${h.over > 1 ? 'over income' : 'within income'}.</p></article>
+    <article class="kpi"><div class="kpi-label">Saved</div><div class="kpi-value">${idr(saved)}</div><p>${Math.round(h.saveRate * 100)}% savings rate · target 20%.</p></article>
     <article class="kpi"><div class="kpi-label">Budget health</div><div class="kpi-value">${h.total}<span class="kpi-of">/100</span></div><p>${h.verdict}.</p></article>
   </section>
   <div class="grid2">
     ${card('Where November’s money went',
-      `<div class="donut-wrap">${donut(spendRows, { centre: rpShort(spent), centreSub: 'spent in Nov' })}</div>
-       <ul class="legend">${spendRows.map(r => `<li><span class="sw" style="background:${r.color}"></span>${r.label} — <b>${r.display}</b></li>`).join('')}</ul>`)}
+      `<div class="donut-wrap">${donut(rows, { centre: idrShort(spent), centreSub: 'spent in Nov' })}</div>
+       <ul class="legend">${rows.map((r) => `<li><span class="sw" style="background:${r.color}"></span>${r.label} — <b>${r.display}</b></li>`).join('')}</ul>`)}
     ${card('50 / 30 / 20 check',
-      `<p>Needs <b>${rp(groups.needs)}</b> (${(groups.needs / income * 100).toFixed(0)}% of income, rule says 50%) ·
-      Wants <b>${rp(groups.wants)}</b> (${(groups.wants / income * 100).toFixed(0)}%, rule says 30%) ·
-      Savings <b>${rp(groups.savings)}</b> (${(groups.savings / income * 100).toFixed(0)}%, rule says 20%).</p>
+      `<p>Needs <b>${idr(groups.needs)}</b> (${pct(groups.needs)}% of income, rule says 50%) ·
+      Wants <b>${idr(groups.wants)}</b> (${pct(groups.wants)}%, rule says 30%) ·
+      Savings <b>${idr(groups.savings)}</b> (${pct(groups.savings)}%, rule says 20%).</p>
       ${hbars([
-        { label: 'Needs', value: Math.round(groups.needs / income * 100), color: '#0f766e', display: Math.round(groups.needs / income * 100) + '%' },
-        { label: 'Wants', value: Math.round(groups.wants / income * 100), color: '#d97706', display: Math.round(groups.wants / income * 100) + '%' },
-        { label: 'Savings', value: Math.round(groups.savings / income * 100), color: '#ea580c', display: Math.round(groups.savings / income * 100) + '%' },
+        { label: 'Needs', value: pct(groups.needs), color: '#0f766e', display: pct(groups.needs) + '%' },
+        { label: 'Wants', value: pct(groups.wants), color: '#d97706', display: pct(groups.wants) + '%' },
+        { label: 'Savings', value: pct(groups.savings), color: '#ea580c', display: pct(groups.savings) + '%' },
       ], { labelW: 90 })}
       <p class="note">Jakarta reality: housing alone takes 28% of income, so needs run high. The fix is not a smaller flat — it is capping wants and automating the transfer to savings on payday.</p>`)}
   </div>
   <div class="grid2">
     ${card('Income vs spending, Jun–Nov 2026 (Rp M)',
-      groupedBars(HISTORY.map(x => x.month), HISTORY.map(x => x.income), HISTORY.map(x => x.spent)),
+      groupedBars(HISTORY.map((row) => row[0]), HISTORY.map((row) => row[1]), HISTORY.map((row) => row[2])),
       'November is the only month spending beat income — leisure and food ran over plan.')}
     ${card('Health score breakdown',
       `<dl class="facts">
-        <div><dt>Savings rate (${(h.saveRate * 100).toFixed(0)}% of income)</dt><dd>${h.savePts} / 40</dd></div>
-        <div><dt>Within budget (${(h.over * 100).toFixed(0)}% spent)</dt><dd>${h.budgetPts} / 30</dd></div>
-        <div><dt>Needs share (${(h.needs * 100).toFixed(0)}% of income)</dt><dd>${h.needsPts} / 30</dd></div>
+        <div><dt>Savings rate (${Math.round(h.saveRate * 100)}% of income)</dt><dd>${h.savePts} / 40</dd></div>
+        <div><dt>Within budget (${Math.round(h.over * 100)}% spent)</dt><dd>${h.budgetPts} / 30</dd></div>
+        <div><dt>Needs share (${Math.round(h.needsShare * 100)}% of income)</dt><dd>${h.needsPts} / 30</dd></div>
       </dl>
       ${alerts ? `<h3>Over budget this month</h3><ul class="bullets">${alerts}</ul>` : '<p>Nothing over budget this month.</p>'}
       <p><button class="btn" id="reset-demo" type="button">Reset demo data</button></p>`)}
@@ -83,37 +110,40 @@ export function viewDashboard() {
 }
 
 export function viewPlanner() {
-  const income = totalIncome();
+  const income = incomeTotal();
   const plannedTotal = Object.values(state.planned).reduce((a, b) => a + b, 0);
-  const rows = CATEGORIES.map(c => {
-    const planned = state.planned[c.id] || 0;
-    const actual = PLAN.actual[c.id] || 0;
+  const spentTotal = BUDGET.reduce((sum, row) => sum + row.spent, 0);
+  const rows = CATEGORIES.map((c) => {
+    const planned = state.planned[c.key] ?? 0;
+    const actual = spentByCat(c.key);
     const diff = planned - actual;
+    const cls = diff < 0 ? 'over' : 'under';
+    const sign = diff < 0 ? '−' : '+';
     return `<tr>
-      <td><span class="sw" style="background:${c.color}"></span> ${c.name} <span class="tag">${c.group}</span></td>
-      <td><input type="number" min="0" step="50000" value="${planned}" data-cat="${c.id}" aria-label="Planned ${c.name}"></td>
-      <td>${rp(actual)}</td>
-      <td class="${diff < 0 ? 'over' : 'under'}">${diff < 0 ? '−' : '+'}${rp(Math.abs(diff))}</td>
+      <td><span class="sw" style="background:${c.colour}"></span> ${c.label} <span class="tag">${c.kind}</span></td>
+      <td><input type="number" min="0" step="50000" value="${planned}" data-cat="${c.key}" aria-label="Planned ${c.label}"></td>
+      <td>${idr(actual)}</td>
+      <td class="${cls}">${sign}${idr(Math.abs(diff))}</td>
     </tr>`;
   }).join('');
   return `
   <p class="lede">Set the plan for ${META.month}. Change any amount — the totals,
-  the remaining money and the 50/30/20 split update as you type. Saving stores
+  the money left over and the 50/30/20 split update as you type. Saving stores
   the plan in your browser.</p>
   <div class="toolbar">
-    <label>Salary <input type="number" id="inc-salary" min="0" step="100000" value="${PLAN.income.salary}"></label>
-    <label>Side income <input type="number" id="inc-side" min="0" step="100000" value="${PLAN.income.side}"></label>
-    <span class="toolbar-total" id="inc-total">Income: <b>${rp(income)}</b></span>
+    <label>Salary <input type="number" id="inc-salary" min="0" step="100000" value="${INCOME.salary}"></label>
+    <label>Side income <input type="number" id="inc-side" min="0" step="100000" value="${INCOME.side}"></label>
+    <span class="toolbar-total" id="inc-total">Income: <b>${idr(income)}</b></span>
   </div>
   <div class="tbl-wrap">
   <table class="tbl">
     <thead><tr><th>Category</th><th>Planned (Rp)</th><th>Spent in Nov</th><th>Planned − spent</th></tr></thead>
     <tbody>${rows}</tbody>
-    <tfoot><tr><td><b>Total planned</b></td><td id="planned-total"><b>${rp(plannedTotal)}</b></td><td>${rp(Object.values(PLAN.actual).reduce((a, b) => a + b, 0))}</td><td id="remaining"><b>${rp(income - plannedTotal)}</b> left</td></tr></tfoot>
+    <tfoot><tr><td><b>Total planned</b></td><td id="planned-total"><b>${idr(plannedTotal)}</b></td><td>${idr(spentTotal)}</td><td id="remaining"><b>${idr(income - plannedTotal)}</b> left</td></tr></tfoot>
   </table>
   </div>
   <div class="grid2" style="margin-top:16px">
-    ${card('50 / 30 / 20 on your plan', `<div id="plan-split"></div>`)}
+    ${card('50 / 30 / 20 on your plan', '<div id="plan-split"></div>')}
     ${card('Save your plan', `<p>Your plan is stored only in this browser — nothing is uploaded.</p>
       <p><button class="btn" id="save-plan" type="button">Save plan</button>
       <button class="btn ghost" id="reset-plan" type="button">Back to sample plan</button></p>
@@ -122,7 +152,7 @@ export function viewPlanner() {
 }
 
 export function viewTracker() {
-  const options = CATEGORIES.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+  const options = CATEGORIES.map((c) => `<option value="${c.key}">${c.label}</option>`).join('');
   return `
   <p class="lede">Every rupiah the Hartonos spent in November, as it happened.
   Add your own expense — it is stored in your browser and counted in the totals below.</p>
@@ -146,20 +176,21 @@ export function viewTracker() {
 }
 
 export function viewGoals() {
+  const cards = state.goals.map((g) => {
+    const pct = Math.min(100, Math.round((g.saved / g.target) * 100));
+    return `<article class="card goal">
+      <h2>${g.label}</h2>
+      <p class="note">${g.note}</p>
+      <div class="bar"><div class="bar-fill" style="width:${pct}%"></div></div>
+      <p><b>${idr(g.saved)}</b> of ${idr(g.target)} · <b>${pct}%</b> · ${idr(g.target - g.saved)} to go</p>
+      <label>Add funds (Rp) <input type="number" min="1000" step="1000" value="100000" data-goal="${g.key}"></label>
+      <button class="btn" type="button" data-add-goal="${g.key}">Add to goal</button>
+    </article>`;
+  }).join('');
   return `
   <p class="lede">Four goals, one habit: move money to them on payday, before
   spending starts. Add funds to any goal — it is stored in your browser.</p>
-  <div class="goals">${state.goals.map(g => {
-    const pct = Math.min(100, Math.round(g.saved / g.target * 100));
-    return `<article class="card goal">
-      <h2>${g.name}</h2>
-      <p class="note">${g.note}</p>
-      <div class="bar"><div class="bar-fill" style="width:${pct}%"></div></div>
-      <p><b>${rp(g.saved)}</b> of ${rp(g.target)} · <b>${pct}%</b> · ${rp(g.target - g.saved)} to go</p>
-      <label>Add funds (Rp) <input type="number" min="1000" step="1000" value="100000" data-goal="${g.id}"></label>
-      <button class="btn" type="button" data-add-goal="${g.id}">Add to goal</button>
-    </article>`;
-  }).join('')}</div>
+  <div class="goals">${cards}</div>
   <section class="card" style="margin-top:16px"><h2>Start a new goal</h2>
     <form id="goal-form" class="add-form">
       <label>Name <input type="text" id="goal-name" required maxlength="60" placeholder="e.g. New motorbike"></label>
@@ -172,6 +203,9 @@ export function viewGoals() {
 }
 
 export function viewTips() {
+  const income = incomeTotal();
+  const split = splitByKind(amountsByCat('spent'));
+  const pct = (part) => Math.round((part / income) * 100);
   return `
   <p class="lede">Three rules that do most of the work — plus two calculators
   that run on your numbers, in your browser.</p>
@@ -182,12 +216,10 @@ export function viewTips() {
       and debt payoff. It is a compass, not a law — in Jakarta, needs often run
       60–70%, so the honest version is: cap wants at 20% and automate savings
       on payday, before spending starts.</p>
-      <p>On the Hartonos’ ${rp(totalIncome())} income, the rule would mean
-      ${rp(totalIncome() * 0.5)} needs, ${rp(totalIncome() * 0.3)} wants and
-      ${rp(totalIncome() * 0.2)} savings. Their actual split is
-      ${Math.round(groupTotals(PLAN.actual).needs / totalIncome() * 100)} /
-      ${Math.round(groupTotals(PLAN.actual).wants / totalIncome() * 100)} /
-      ${Math.round(groupTotals(PLAN.actual).savings / totalIncome() * 100)}.</p>`)}
+      <p>On the Hartonos’ ${idr(income)} income, the rule would mean
+      ${idr(income * 0.5)} needs, ${idr(income * 0.3)} wants and
+      ${idr(income * 0.2)} savings. Their actual split is
+      ${pct(split.needs)} / ${pct(split.wants)} / ${pct(split.savings)}.</p>`)}
     ${card('Pay yourself first',
       `<ul class="bullets">
         <li>Set an automatic transfer to savings for the day after payday.</li>
@@ -220,16 +252,16 @@ export const VIEWS = {
 };
 
 export function pageTitle(path) {
-  const item = NAV.find(n => n.hash === '#' + path);
-  return item ? `${item.title} · RumahKas` : 'RumahKas · Household Budget Planner';
+  const item = NAV.find((n) => n.to === '#' + path);
+  return item ? `${item.page} · RumahKas` : 'RumahKas · Household Budget Planner';
 }
 
 // Wire page-specific controls after a render. Called by main.js.
 export function wire(path, rerender) {
   if (path === '/') {
-    const btn = document.getElementById('reset-demo');
-    if (btn) btn.addEventListener('click', () => {
+    document.getElementById('reset-demo')?.addEventListener('click', () => {
       state = resetState();
+      applyIncome();
       rerender();
     });
   }
@@ -240,34 +272,36 @@ export function wire(path, rerender) {
     const msg = document.getElementById('plan-msg');
     const refresh = () => {
       const income = (Number(salary.value) || 0) + (Number(side.value) || 0);
-      const plannedTotal = inputs.reduce((a, el) => a + (Number(el.value) || 0), 0);
-      document.getElementById('inc-total').innerHTML = `Income: <b>${rp(income)}</b>`;
-      document.getElementById('planned-total').innerHTML = `<b>${rp(plannedTotal)}</b>`;
+      const plannedTotal = inputs.reduce((sum, el) => sum + (Number(el.value) || 0), 0);
+      document.getElementById('inc-total').innerHTML = `Income: <b>${idr(income)}</b>`;
+      document.getElementById('planned-total').innerHTML = `<b>${idr(plannedTotal)}</b>`;
       const left = income - plannedTotal;
       const rem = document.getElementById('remaining');
-      rem.innerHTML = `<b>${rp(left)}</b> ${left < 0 ? 'over income' : 'left'}`;
+      rem.innerHTML = `<b>${idr(left)}</b> ${left < 0 ? 'over income' : 'left'}`;
       rem.classList.toggle('over', left < 0);
       const amounts = {};
-      inputs.forEach(el => { amounts[el.dataset.cat] = Number(el.value) || 0; });
-      const g = groupTotals(amounts);
+      for (const el of inputs) amounts[el.dataset.cat] = Number(el.value) || 0;
+      const g = splitByKind(amounts);
+      const share = (part) => Math.round((part / income) * 100) || 0;
       document.getElementById('plan-split').innerHTML = hbars([
-        { label: 'Needs', value: Math.round(g.needs / income * 100) || 0, color: '#0f766e', display: Math.round(g.needs / income * 100) + '%' },
-        { label: 'Wants', value: Math.round(g.wants / income * 100) || 0, color: '#d97706', display: Math.round(g.wants / income * 100) + '%' },
-        { label: 'Savings', value: Math.round(g.savings / income * 100) || 0, color: '#ea580c', display: Math.round(g.savings / income * 100) + '%' },
+        { label: 'Needs', value: share(g.needs), color: '#0f766e', display: share(g.needs) + '%' },
+        { label: 'Wants', value: share(g.wants), color: '#d97706', display: share(g.wants) + '%' },
+        { label: 'Savings', value: share(g.savings), color: '#ea580c', display: share(g.savings) + '%' },
       ], { labelW: 90 }) + `<p class="note">Rule of thumb: 50 / 30 / 20. ${left < 0 ? 'The plan currently spends more than the income — trim a category.' : 'The plan fits inside the income.'}</p>`;
     };
-    inputs.forEach(el => el.addEventListener('input', refresh));
+    for (const el of inputs) el.addEventListener('input', refresh);
     salary.addEventListener('input', refresh);
     side.addEventListener('input', refresh);
     document.getElementById('save-plan').addEventListener('click', () => {
-      inputs.forEach(el => { state.planned[el.dataset.cat] = Number(el.value) || 0; });
-      PLAN.income.salary = Number(salary.value) || 0;
-      PLAN.income.side = Number(side.value) || 0;
+      for (const el of inputs) state.planned[el.dataset.cat] = Number(el.value) || 0;
+      state.income = { salary: Number(salary.value) || 0, side: Number(side.value) || 0 };
+      applyIncome();
       saveState(state);
       msg.textContent = 'Plan saved in this browser.';
     });
     document.getElementById('reset-plan').addEventListener('click', () => {
       state = resetState();
+      applyIncome();
       saveState(state);
       rerender();
     });
@@ -278,63 +312,70 @@ export function wire(path, rerender) {
     const totalEl = document.getElementById('tx-total');
     const byCat = document.getElementById('tx-by-cat');
     const filter = document.getElementById('tx-filter');
-    const render = () => {
+    const renderRows = () => {
       const f = filter.value;
       const rows = [...state.transactions]
-        .filter(t => !f || t.cat === f)
-        .sort((a, b) => b.date.localeCompare(a.date));
-      body.innerHTML = rows.map((t, i) => {
+        .filter((t) => !f || t.cat === f)
+        .sort((a, b) => b.on.localeCompare(a.on));
+      body.innerHTML = rows.map((t) => {
         const idx = state.transactions.indexOf(t);
-        return `<tr><td>${t.date}</td><td>${t.desc}</td><td>${catById(t.cat).name}</td><td>${rp(t.amount)}</td>
+        return `<tr><td>${t.on}</td><td>${t.what}</td><td>${findCategory(t.cat).label}</td><td>${idr(t.rp)}</td>
         <td><button class="btn small" type="button" data-del="${idx}">Delete</button></td></tr>`;
-      }).join('') || `<tr><td colspan="5">No expenses in this filter.</td></tr>`;
-      const shown = rows.reduce((a, t) => a + t.amount, 0);
-      totalEl.innerHTML = `Showing <b>${rows.length}</b> expenses · total <b>${rp(shown)}</b>`;
+      }).join('') || '<tr><td colspan="5">No expenses in this filter.</td></tr>';
+      const shown = rows.reduce((sum, t) => sum + t.rp, 0);
+      totalEl.innerHTML = `Showing <b>${rows.length}</b> expenses · total <b>${idr(shown)}</b>`;
       const sums = {};
-      state.transactions.forEach(t => { sums[t.cat] = (sums[t.cat] || 0) + t.amount; });
-      const catRows = Object.entries(sums).map(([id, v]) => ({
-        label: catById(id).name, value: v, color: catById(id).color, display: rpShort(v),
-      })).sort((a, b) => b.value - a.value);
+      for (const t of state.transactions) sums[t.cat] = (sums[t.cat] || 0) + t.rp;
+      const catRows = Object.entries(sums)
+        .map(([key, value]) => {
+          const cat = findCategory(key);
+          return { label: cat.label, value, color: cat.colour, display: idrShort(value) };
+        })
+        .sort((a, b) => b.value - a.value);
       byCat.innerHTML = card('Totals by category (all rows in this table)', hbars(catRows, { labelW: 180 }));
-      body.querySelectorAll('[data-del]').forEach(btn => btn.addEventListener('click', () => {
-        state.transactions.splice(Number(btn.dataset.del), 1);
-        saveState(state);
-        render();
-      }));
+      for (const btn of body.querySelectorAll('[data-del]')) {
+        btn.addEventListener('click', () => {
+          state.transactions.splice(Number(btn.dataset.del), 1);
+          saveState(state);
+          renderRows();
+        });
+      }
     };
-    filter.addEventListener('change', render);
-    document.getElementById('add-form').addEventListener('submit', e => {
+    filter.addEventListener('change', renderRows);
+    document.getElementById('add-form').addEventListener('submit', (e) => {
       e.preventDefault();
       const desc = document.getElementById('add-desc').value.trim();
       const amount = Number(document.getElementById('add-amount').value);
       const date = document.getElementById('add-date').value;
       if (!desc || !amount || !date) return;
-      state.transactions.push({ date, desc, cat: document.getElementById('add-cat').value, amount });
+      state.transactions.push({ on: date, what: desc, cat: document.getElementById('add-cat').value, rp: amount });
       saveState(state);
       e.target.reset();
       document.getElementById('add-date').value = '2026-11-26';
-      render();
+      renderRows();
     });
-    render();
+    renderRows();
   }
   if (path === '/goals') {
-    document.querySelectorAll('[data-add-goal]').forEach(btn => btn.addEventListener('click', () => {
-      const id = btn.dataset.addGoal;
-      const input = document.querySelector(`input[data-goal="${id}"]`);
-      const amount = Number(input.value) || 0;
-      if (amount <= 0) return;
-      const g = state.goals.find(x => x.id === id);
-      g.saved += amount;
-      saveState(state);
-      rerender();
-    }));
-    document.getElementById('goal-form').addEventListener('submit', e => {
+    for (const btn of document.querySelectorAll('[data-add-goal]')) {
+      btn.addEventListener('click', () => {
+        const key = btn.dataset.addGoal;
+        const input = document.querySelector(`input[data-goal="${key}"]`);
+        const amount = Number(input.value) || 0;
+        if (amount <= 0) return;
+        const g = state.goals.find((x) => x.key === key);
+        g.saved += amount;
+        saveState(state);
+        rerender();
+      });
+    }
+    document.getElementById('goal-form').addEventListener('submit', (e) => {
       e.preventDefault();
       const name = document.getElementById('goal-name').value.trim();
       const target = Number(document.getElementById('goal-target').value);
       const saved = Number(document.getElementById('goal-saved').value) || 0;
       if (!name || !target) return;
-      state.goals.push({ id: 'g' + Date.now(), name, target, saved, note: 'Added by you' });
+      state.goals.push({ key: 'g' + Date.now(), label: name, target, saved, note: 'Added by you' });
       saveState(state);
       rerender();
     });
@@ -344,7 +385,7 @@ export function wire(path, rerender) {
     const efOut = document.getElementById('ef-out');
     const drawEf = () => {
       const m = Number(efMonthly.value) || 0;
-      efOut.innerHTML = `3 months: <b>${rp(m * 3)}</b><br>6 months: <b>${rp(m * 6)}</b>`;
+      efOut.innerHTML = `3 months: <b>${idr(m * 3)}</b><br>6 months: <b>${idr(m * 6)}</b>`;
     };
     efMonthly.addEventListener('input', drawEf);
     drawEf();
@@ -356,12 +397,16 @@ export function wire(path, rerender) {
       let b = Number(bal.value) || 0;
       const r = (Number(apr.value) || 0) / 100 / 12;
       const p = Number(pay.value) || 0;
-      if (!b || !p) { out.textContent = 'Enter a balance and a monthly payment.'; return; }
-      if (r > 0 && p <= b * r) {
-        out.innerHTML = `The payment <b>${rp(p)}</b> does not cover the monthly interest of <b>${rp(b * r)}</b> — the balance would grow. Raise the payment above ${rp(Math.ceil(b * r / 1000) * 1000)}.`;
+      if (!b || !p) {
+        out.textContent = 'Enter a balance and a monthly payment.';
         return;
       }
-      let months = 0, interest = 0;
+      if (r > 0 && p <= b * r) {
+        out.innerHTML = `The payment <b>${idr(p)}</b> does not cover the monthly interest of <b>${idr(b * r)}</b> — the balance would grow. Raise the payment above ${idr(Math.ceil((b * r) / 1000) * 1000)}.`;
+        return;
+      }
+      let months = 0;
+      let interest = 0;
       while (b > 0 && months < 600) {
         const i = b * r;
         interest += i;
@@ -370,9 +415,9 @@ export function wire(path, rerender) {
       }
       out.innerHTML = months >= 600
         ? 'More than 50 years at this payment — raise the monthly amount.'
-        : `Paid off in <b>${months} month${months === 1 ? '' : 's'}</b> (${(months / 12).toFixed(1)} years), total interest <b>${rp(interest)}</b>.`;
+        : `Paid off in <b>${months} month${months === 1 ? '' : 's'}</b> (${(months / 12).toFixed(1)} years), total interest <b>${idr(interest)}</b>.`;
     };
-    [bal, apr, pay].forEach(el => el.addEventListener('input', drawDebt));
+    for (const el of [bal, apr, pay]) el.addEventListener('input', drawDebt);
     drawDebt();
   }
 }
